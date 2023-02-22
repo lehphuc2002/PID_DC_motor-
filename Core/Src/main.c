@@ -18,7 +18,9 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-
+#include "stdlib.h"
+#include "string.h"
+#include "stdio.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
@@ -31,7 +33,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define Pulseee 1980   // 11 vong/phut * 45 (ti so truyen 1:45) *  4 (2 canh xung A va B)
+#define Pulseee 1980.0   // 11 vong/phut * 45 (ti so truyen 1:45) *  4 (2 canh xung A va B)
 #define Ts 0.05
 //#define PULSE_PER_REVOLUTION  19800
 //#define TIME_INTERVAL         0.01f    // Sampling time in seconds
@@ -49,6 +51,8 @@ TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim3;
 
+UART_HandleTypeDef huart1;
+
 /* USER CODE BEGIN PV */
 //LiquidCrystal_I2C lcd1;
 /* USER CODE END PV */
@@ -60,49 +64,49 @@ static void MX_I2C1_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_TIM3_Init(void);
+static void MX_USART1_UART_Init(void);
 /* USER CODE BEGIN PFP */
 int16_t vongtrengiay = 0, checkxung = 0,  speed = 0;
-float error = 0, pre_error = 0, position, output_pid;
+float  position, output_pid;
 float error_posi = 0, pre_error_posi = 0;
-volatile int16_t checkCNT = 0, checkCNT_previous = 0,sovongquay = 0;
-uint8_t overflow = 0, first_check = 0;
-volatile short now_counter = 0, time_interrupt;
+float error_velo = 0, pre_error_velo = 0;
+volatile short now_counter = 0 ;
 volatile int32_t motor_position;
-float count1 = 0, count2 = 0;
-int32_t count_diff = 0;
-int32_t count = 0;
-float now_position;
-float number_rotation;
-typedef struct
-{
+float now_position, now_encoder_speed, setpoint_posi_degrees;
+float number_rotation, velocity_real;
+char data1[30] = "Position is:";
+char buffer[50];
+
+typedef struct {
 	float P_part;
 	float I_part;
 	float D_part;
 } PID_control;
 PID_control PID_contr;
-typedef struct
-{
+
+typedef struct {
 	int32_t position;
-	int32_t position_real;
-	volatile int32_t speed_by_encoder;  // don vi: xung/(tgian ngat timer)
-	volatile short pre_counter;
-	volatile int16_t velocity;    // vong/phut
-	volatile int16_t pre_velocity;
-	volatile float velocity_degrees_p_sec;
-	volatile float velocity_not;   // bien nay dung trong truong hop quay nguoc dan den toc do am, dung chung lun
+//	int32_t position_real;
+	int16_t speed_by_encoder;  // don vi: xung/(tgian ngat timer)
+	int16_t pre_speed_by_encoder;
+	short pre_counter;
+	int32_t velocity;    // vong/phut
+	int32_t pre_velocity;
+//	volatile float velocity_degrees_p_sec;
+//	volatile float velocity_not;   // bien nay dung trong truong hop quay nguoc dan den toc do am, dung chung lun
 } instance_encoder;
 instance_encoder instance_enc;
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-typedef enum
-{
+typedef enum {
 	RR_MOTOR,
 	NRR_MOTOR,
 	STOP_MOTOR
-}motor_status;
+} motor_status;
 motor_status motor;
+
 typedef enum
 {
 	Select_Velo,
@@ -140,8 +144,7 @@ int32_t prev_count = 0;
 //			htim1.Instance->CCR3 = 0;
 //		}
 //}
-void PWM_control_position(TIM_HandleTypeDef *htim, float duty)
-{
+void PWM_control_position(TIM_HandleTypeDef *htim, float duty) {
 //	if(duty>90.0)
 //	{
 //		duty = 90.0;
@@ -153,45 +156,35 @@ void PWM_control_position(TIM_HandleTypeDef *htim, float duty)
 		htim1.Instance->CCR3 =  duty*(htim1.Instance->ARR)/100;;
 //		htim1.Instance->CCR3 =  duty*900/100;
 	}
+	else if(duty < 0) {
+		HAL_GPIO_WritePin(IN1_GPIO_Port,IN1_Pin,GPIO_PIN_RESET);
+		HAL_GPIO_WritePin(IN2_GPIO_Port,IN2_Pin,GPIO_PIN_SET);
+		htim1.Instance->CCR3 =  (-duty)*(htim1.Instance->ARR)/100; // nguoc chieu kim dong ho
+//		htim1.Instance->CCR3 =  -duty*900/100;
+	}
+	else {
+		HAL_GPIO_WritePin(IN1_GPIO_Port,IN1_Pin,GPIO_PIN_SET);
+		HAL_GPIO_WritePin(IN2_GPIO_Port,IN2_Pin,GPIO_PIN_SET);
+	}
+}
+void PWM_control_velocity(TIM_HandleTypeDef *htim, float duty) {
+	if(duty > 0)
+	{
+		HAL_GPIO_WritePin(IN1_GPIO_Port,IN1_Pin,GPIO_PIN_SET);
+		HAL_GPIO_WritePin(IN2_GPIO_Port,IN2_Pin,GPIO_PIN_RESET); //chieu thuan cung chieu kim dong ho
+		htim1.Instance->CCR3 =  duty*(htim1.Instance->ARR)/100;;
+	}
 	else if(duty < 0)
 	{
 		HAL_GPIO_WritePin(IN1_GPIO_Port,IN1_Pin,GPIO_PIN_RESET);
 		HAL_GPIO_WritePin(IN2_GPIO_Port,IN2_Pin,GPIO_PIN_SET);
 		htim1.Instance->CCR3 =  (-duty)*(htim1.Instance->ARR)/100; // nguoc chieu kim dong ho
-//		htim1.Instance->CCR3 =  -duty*900/100;
 	}
 	else
 	{
 		HAL_GPIO_WritePin(IN1_GPIO_Port,IN1_Pin,GPIO_PIN_SET);
 		HAL_GPIO_WritePin(IN2_GPIO_Port,IN2_Pin,GPIO_PIN_SET);
 	}
-}
-void PWM_control_velocity(TIM_HandleTypeDef *htim, float duty, motor_status mode)
-{
-	switch(mode)
-	{
-		case NRR_MOTOR:
-	//		HAL_GPIO_WritePin(IN1_GPIO_Port,IN1_Pin,GPIO_PIN_RESET);
-			HAL_GPIO_WritePin(IN1_GPIO_Port,IN1_Pin,GPIO_PIN_SET);
-	//			HAL_GPIO_WritePin(IN2_GPIO_Port,IN2_Pin,1);
-			HAL_GPIO_WritePin(IN2_GPIO_Port,IN2_Pin,0);
-			htim1.Instance->CCR3 = duty*(htim1.Instance->ARR)/100;;
-	//			htim1.Instance->CCR3 = duty*999/100;
-		break;
-		case RR_MOTOR:
-	//			HAL_GPIO_WritePin(IN1_GPIO_Port,IN1_Pin,GPIO_PIN_SET);
-			HAL_GPIO_WritePin(IN1_GPIO_Port,IN1_Pin,GPIO_PIN_RESET);
-	//			HAL_GPIO_WritePin(IN2_GPIO_Port,IN2_Pin,0);
-			HAL_GPIO_WritePin(IN2_GPIO_Port,IN2_Pin,1);
-	//			htim1.Instance->CCR3 = htim1.Instance->ARR - duty*(htim1.Instance->ARR)/100;;
-			htim1.Instance->CCR3 = duty*(htim1.Instance->ARR)/100;
-		break;
-		case STOP_MOTOR:
-			HAL_GPIO_WritePin(IN1_GPIO_Port,IN1_Pin,GPIO_PIN_RESET);
-			htim1.Instance->CCR3 = 0;
-		break;
-	}
-
 }
 //void encoder(TIM_HandleTypeDef *htim, instance_encoder *encoder_value)
 //{     // tinh toc do xung moi 100ms
@@ -249,9 +242,12 @@ void PWM_control_velocity(TIM_HandleTypeDef *htim, float duty, motor_status mode
 //}  // velocity:   // vong/phut
 void encoder()
 {
-	instance_enc.velocity = htim2.Instance->CNT - instance_enc.pre_velocity;
-	instance_enc.pre_velocity = htim2.Instance->CNT;
-	instance_enc.position += instance_enc.velocity;
+	instance_enc.speed_by_encoder = htim2.Instance->CNT - instance_enc.pre_speed_by_encoder;
+//	htim2.Instance->CNT = 0;
+	instance_enc.pre_speed_by_encoder = htim2.Instance->CNT;
+//	instance_enc.speed_by_encoder = htim2.Instance->CNT;
+	instance_enc.position += instance_enc.speed_by_encoder;
+//	htim2.Instance->CNT = 0;
 }
 //void control_PID_velocity(PID_control *pid_tune, float setpoint, float Kp, float Ki, float Kd)
 //{
@@ -274,16 +270,17 @@ void encoder()
 //	}
 //	pre_error = error;
 //}
-void control_PID_Position(PID_control *pid_tune, float setpoint, float Kp, float Ki, float Kd)    // moi chi dieu khien duoc toc do dong co
+void control_PID_Position(PID_control *pid_tune, float setpoint_posi_rotation, float Kp, float Ki, float Kd)    // moi chi dieu khien duoc toc do dong co
 {
 //	instance_enc.velocity_not = instance_enc.velocity;
 //	if(instance_enc.velocity_not < 0)
 //	{
 //		instance_enc.velocity_not = -instance_enc.velocity_not;   // am thi doi thanh duong cho de dung PID =))))
 //	}
-	now_position =  (float)instance_enc.position/1980*360;
+	now_position =  (float)instance_enc.position*360/1980;  // now_position = độ
 	number_rotation = now_position/360;
-	error_posi = setpoint - (now_position);
+//	setpoint_posi_degrees = setpoint_posi_rotation*360;   // setpoint_posi_rotation la set số vòng cho dễ set
+	error_posi = setpoint_posi_rotation - (now_position);
 	pid_tune->P_part = error_posi;
 	pid_tune->I_part += error_posi*Ts;
 //	if(error < 0.03*setpoint)
@@ -307,6 +304,26 @@ void control_PID_Position(PID_control *pid_tune, float setpoint, float Kp, float
 	pre_error_posi = error_posi;
 
 }
+void control_PID_Velocity(PID_control *pid_tune, float setpoint_velo, float Kp, float Ki, float Kd)    // moi chi dieu khien duoc toc do dong co
+{   //velocity vong/phut
+	velocity_real =  (float)instance_enc.speed_by_encoder*60.0f/(Ts*Pulseee);
+	error_velo = setpoint_velo - (velocity_real);
+	instance_enc.velocity = velocity_real;
+	pid_tune->P_part = error_velo;
+	pid_tune->I_part += error_velo*Ts;
+	pid_tune->D_part = (error_velo-pre_error_velo)/Ts;
+	output_pid = Kp*(pid_tune->P_part) + Ki*(pid_tune->I_part) + Kd*(pid_tune->D_part);
+	if(output_pid > 90.0)
+	{
+		output_pid = 90.0;
+	}
+	else if(output_pid < -90)
+	{
+		output_pid = -90.0;
+	}
+	pre_error_velo = error_velo;
+
+}
 void select_mode(Select_Tune select)
 {
 //	select_tunning select;
@@ -314,9 +331,11 @@ void select_mode(Select_Tune select)
 	{
 		case Select_Posi:
 			PWM_control_position(&htim1, output_pid);
+//			sprintf(buffer, "Position is: %.3f", now_position);
+//			HAL_UART_Receive_IT(&huart1, buffer, strlen(buffer));
 		break;
 		case Select_Velo:
-			PWM_control_velocity(&htim1, output_pid,NRR_MOTOR);
+			PWM_control_velocity(&htim1, output_pid);
 		break;
 		default:
 		break;
@@ -324,50 +343,20 @@ void select_mode(Select_Tune select)
 }
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-	if(htim->Instance == TIM3)
-	{
+	if(htim->Instance == TIM3){
 //		encoder(&htim2,&instance_enc);
 		encoder();
-//		if (htim == &htim2)
-//		  {
-//		    count = __HAL_TIM_GetCounter(&htim2);
-//		    count_diff = count - prev_count;
-//
-////		    // Handle counter underflow
-////		    if (count_diff < -PULSE_PER_REVOLUTION / 2)
-////		    {
-////		      count_diff += PULSE_PER_REVOLUTION;
-////		    }
-////
-////		    // Handle counter overflow
-////		    if (count_diff > PULSE_PER_REVOLUTION / 2)
-////		    {
-////		      count_diff -= PULSE_PER_REVOLUTION;
-////		    }
-//		    // Handle counter overflow
-//		       if (count < prev_count && count_diff > 0)
-//		       {
-//		           count_diff -= PULSE_PER_REVOLUTION;
-//		       }
-//
-//		       // Handle counter underflow
-//		       if (count > prev_count && count_diff < 0)
-//		       {
-//		           count_diff += PULSE_PER_REVOLUTION;
-//		       }
-//		    velocity1 = (float) count_diff / PULSE_PER_REVOLUTION / TIME_INTERVAL;  // calculate velocity in rev/s (vong/s)
-//		    position1 += velocity1 * 360.0f * TIME_INTERVAL;                        // calculate position in degrees (do)
-//		    prev_count = count;
-	//	  }
 	}
-//	motor_position = instance_enc.position;
-//	control_PID(&PID_contr, 25, 1, 0.5, 0.005, Select_Posi);
-
-	control_PID_Position(&PID_contr, 1440, 0.8,2,0.06);
+	control_PID_Position(&PID_contr, -720, 0.07, 0.01, 0.03);
 	select_mode(Select_Posi);
 
+//	control_PID_Velocity(&PID_contr, -50, 0.8, 2, 0.06); // toc do 30vong/phut
+//	select_mode(Select_Velo);
 }
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
 
+}
 /*
  tao bien so vong quay, lay so vong quay la position can dien vao GUI, sovongquay =
  */
@@ -405,6 +394,7 @@ int main(void)
   MX_TIM1_Init();
   MX_TIM2_Init();
   MX_TIM3_Init();
+  MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
   HAL_TIM_Encoder_Start(&htim2, TIM_CHANNEL_ALL);
   HAL_TIM_Base_Start_IT(&htim3);
@@ -658,6 +648,39 @@ static void MX_TIM3_Init(void)
   /* USER CODE BEGIN TIM3_Init 2 */
 
   /* USER CODE END TIM3_Init 2 */
+
+}
+
+/**
+  * @brief USART1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART1_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART1_Init 0 */
+
+  /* USER CODE END USART1_Init 0 */
+
+  /* USER CODE BEGIN USART1_Init 1 */
+
+  /* USER CODE END USART1_Init 1 */
+  huart1.Instance = USART1;
+  huart1.Init.BaudRate = 115200;
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
+  huart1.Init.StopBits = UART_STOPBITS_1;
+  huart1.Init.Parity = UART_PARITY_NONE;
+  huart1.Init.Mode = UART_MODE_TX_RX;
+  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART1_Init 2 */
+
+  /* USER CODE END USART1_Init 2 */
 
 }
 
